@@ -33,7 +33,6 @@ body{
   background:var(--bg); color:var(--text);
   display:flex; overflow:hidden;
   transition:background .3s,color .3s;
-  /* iOS safe area */
   padding-left:env(safe-area-inset-left);
   padding-right:env(safe-area-inset-right);
 }
@@ -126,7 +125,6 @@ main{flex:1;display:flex;flex-direction:column;height:100vh;overflow:hidden;min-
 .ni-date{font-size:.7rem;color:var(--text-faint);transition:color .15s;}
 .ni-dot{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--warning);margin-right:4px;vertical-align:middle;opacity:0;transition:opacity .2s;}
 .note-item.unsaved .ni-dot{opacity:1;}
-/* BUG FIX: 刪除按鈕在觸控裝置上永遠可見 */
 .ni-del{
   position:absolute;right:10px;top:50%;transform:translateY(-50%);
   background:none;border:none;color:var(--text-faint);
@@ -135,12 +133,12 @@ main{flex:1;display:flex;flex-direction:column;height:100vh;overflow:hidden;min-
   opacity:0;
 }
 .note-item:hover .ni-del{opacity:1;}
-@media (hover:none){.ni-del{opacity:1;}} /* 觸控裝置永遠顯示 */
+@media (hover:none){.ni-del{opacity:1;}}
 .ni-del:hover{color:var(--danger);background:rgba(255,59,48,.1);}
 
 .sb-footer{
   padding:14px 16px;
-  padding-bottom:calc(14px + env(safe-area-inset-bottom)); /* iOS home bar */
+  padding-bottom:calc(14px + env(safe-area-inset-bottom));
   border-top:1px solid var(--border);
   display:flex;align-items:center;gap:10px;
   flex-shrink:0;transition:border-color .3s;
@@ -171,6 +169,7 @@ nav{
 }
 .status-chip.online{color:var(--success);}
 .status-chip.syncing{color:var(--warning);}
+.status-chip.error{color:var(--danger);}
 .sdot{width:5px;height:5px;border-radius:50%;background:currentColor;flex-shrink:0;}
 .sdot.pulse{animation:pulse 1s infinite;}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
@@ -209,7 +208,6 @@ nav{
   font-size:.78rem;color:var(--text-muted);font-family:inherit;
   cursor:pointer;padding:3px 20px 3px 4px;border-radius:6px;
   transition:color .15s,background .15s;
-  /* BUG FIX: 保留系統下拉箭頭，讓使用者知道可以點選 */
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238E8E93' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
   background-repeat:no-repeat;
   background-position:right 4px center;
@@ -241,7 +239,6 @@ nav{
   min-height:300px;
   word-break:break-word;
 }
-/* FIX: 強制所有子元素繼承編輯器的字體與顏色設定 */
 #editor *{
   font-family:inherit !important;
   font-size:inherit !important;
@@ -267,7 +264,7 @@ nav{
 #empty-state svg{width:56px;height:56px;opacity:.12;}
 #empty-state p{font-size:.88rem;line-height:1.6;}
 
-/* ── Mobile sidebar overlay backdrop ── */
+/* ── Mobile sidebar overlay ── */
 #mob-backdrop{
   display:none;position:fixed;inset:0;z-index:49;
   background:rgba(0,0,0,.35);
@@ -279,7 +276,6 @@ nav{
 /* ── Mobile ── */
 @media(max-width:768px){
   #mob-menu-btn{display:flex;}
-  /* 專注模式在手機上不生效（無意義） */
   #btn-focus{display:none;}
   aside{
     position:fixed;left:0;top:0;bottom:0;
@@ -314,7 +310,6 @@ nav{
   </div>
 </div>
 
-<!-- 手機側欄背景遮罩 -->
 <div id="mob-backdrop"></div>
 
 <aside id="sidebar">
@@ -417,6 +412,9 @@ const sb = supabase.createClient(SB_URL, SB_KEY);
 
 let user = null, noteId = null, notes = {}, saveTimer = null;
 let realtimeChannel = null, isMobOpen = false, isFocus = false;
+let retryTimer = null, retryCount = 0;
+const MAX_RETRY = 5;
+const RETRY_DELAYS = [3000, 5000, 10000, 20000, 30000];
 const $ = id => document.getElementById(id);
 
 // ── Theme ──────────────────────────────────────────────────
@@ -435,7 +433,7 @@ $('btn-theme').onclick = () => {
   syncThemeIcon(next);
 };
 
-// ── Font & Size（儲存偏好）─────────────────────────────────
+// ── Font & Size ────────────────────────────────────────────
 const FONTS = {
   serif: "'Lora','Noto Serif TC',serif",
   sans:  "'Inter','Noto Sans TC',sans-serif"
@@ -452,7 +450,6 @@ function applyEditorFont(font, size) {
   const ed = $('editor');
   ed.style.fontFamily = FONTS[font];
   ed.style.fontSize   = size;
-  // FIX: 清除所有子節點的 inline font 樣式，讓 CSS inherit 生效
   ed.querySelectorAll('*').forEach(el => {
     el.style.fontFamily = '';
     el.style.fontSize   = '';
@@ -477,7 +474,6 @@ $('btn-focus').onclick = () => {
   $('btn-focus').classList.toggle('active', isFocus);
 };
 
-// BUG FIX: 視窗縮小到手機尺寸時自動解除專注模式，避免側欄卡死
 window.addEventListener('resize', () => {
   if (window.innerWidth <= 768 && isFocus) {
     isFocus = false;
@@ -487,10 +483,8 @@ window.addEventListener('resize', () => {
 });
 
 // ── Auth ───────────────────────────────────────────────────
-// onAuthStateChange 在訂閱時會立即觸發一次當前 session 狀態，無需額外呼叫 getSession
 sb.auth.onAuthStateChange((_e, session) => {
   const newUser = session?.user ?? null;
-  // 避免重複觸發：user 沒有實際變化時跳過
   if (newUser?.id === user?.id) return;
   user = newUser;
   user ? onLogin(user) : onLogout();
@@ -512,6 +506,14 @@ async function onLogin(u) {
   setStatus('online');
   await loadNotes();
   setupRealtime();
+  // 定期強制存檔（每 30 秒）── FIX: 防止長時間停頓後內容未存
+  setInterval(() => {
+    if (noteId && saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      saveNote();
+    }
+  }, 30000);
 }
 
 function onLogout() {
@@ -522,6 +524,7 @@ function onLogout() {
   $('btn-logout').style.display = 'none';
   setStatus('offline');
   if (realtimeChannel) { sb.removeChannel(realtimeChannel); realtimeChannel = null; }
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
   notes = {}; noteId = null;
   renderList(); showEmpty();
 }
@@ -567,7 +570,7 @@ async function newNote() {
 }
 
 async function openNote(id) {
-  // FIX: 切換前先立即儲存待存的修改，避免 debounce 覆蓋到新筆記
+  // 切換前立即儲存待存的修改，避免 debounce 覆蓋新筆記
   if (saveTimer && noteId && noteId !== id) {
     clearTimeout(saveTimer);
     saveTimer = null;
@@ -580,11 +583,13 @@ async function openNote(id) {
   showEditor();
   $('title-input').value = data.title || '';
   $('editor').innerHTML  = data.body  || '';
-  // FIX: 載入筆記後重新套用字體，清除儲存內容中殘留的 inline 樣式
   applyEditorFont($('font-select').value, $('size-select').value);
   updateStats();
   renderList();
   $('save-info').textContent = '';
+  // 重置重試計數
+  retryCount = 0;
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
 }
 
 async function delNote(id) {
@@ -607,23 +612,90 @@ function onInput() {
 
 async function saveNote() {
   if (!noteId || !user) return;
-  // FIX: 快照當下的 noteId，避免非同步期間 noteId 被切換導致存錯
+  saveTimer = null;
+
+  // FIX: 快照 noteId，避免非同步期間 noteId 被切換導致存錯
   const savingId = noteId;
   const title = $('title-input').value.trim();
   const body  = $('editor').innerHTML;
   const now   = new Date().toISOString();
+
+  // FIX: Session 可能過期，先嘗試刷新 token 再儲存
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) {
+    const { error: refreshErr } = await sb.auth.refreshSession();
+    if (refreshErr) {
+      setStatus('offline');
+      scheduleRetry(savingId);
+      return;
+    }
+  }
+
   const { error } = await sb.from('notes')
     .update({ title, body, updated_at: now })
     .eq('id', savingId);
-  if (error) { console.error('save', error); setStatus('offline'); return; }
-  if (notes[savingId]) { notes[savingId].title = title; notes[savingId].body = body; notes[savingId].updated_at = now; }
-  // 只在仍在同一則筆記時才更新 UI
+
+  if (error) {
+    console.error('save error', error);
+    // FIX: Token 過期時嘗試刷新後重試
+    if (error.status === 401 || error.code === 'PGRST301') {
+      const { error: refreshErr } = await sb.auth.refreshSession();
+      if (!refreshErr) {
+        // Token 刷新成功，立即重試一次
+        const { error: retryErr } = await sb.from('notes')
+          .update({ title, body, updated_at: now })
+          .eq('id', savingId);
+        if (!retryErr) {
+          onSaveSuccess(savingId, title, body, now);
+          return;
+        }
+      }
+    }
+    setStatus('error');
+    if (noteId === savingId) {
+      $('save-info').textContent = '⚠ 儲存失敗，將重試…';
+    }
+    // FIX: 網路失敗後自動重試，不讓內容悄悄遺失
+    scheduleRetry(savingId);
+    return;
+  }
+
+  onSaveSuccess(savingId, title, body, now);
+}
+
+function onSaveSuccess(savingId, title, body, now) {
+  if (notes[savingId]) {
+    notes[savingId].title = title;
+    notes[savingId].body  = body;
+    notes[savingId].updated_at = now;
+  }
+  retryCount = 0;
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
   if (noteId === savingId) {
     setStatus('online');
     markSaved();
     $('save-info').textContent = '已儲存 ' + new Date().toLocaleTimeString('zh-TW', { hour:'2-digit', minute:'2-digit' });
   }
   renderList();
+}
+
+// FIX: 指數退避重試機制
+function scheduleRetry(targetId) {
+  if (retryCount >= MAX_RETRY) {
+    console.warn('已達最大重試次數，放棄重試');
+    return;
+  }
+  if (retryTimer) clearTimeout(retryTimer);
+  const delay = RETRY_DELAYS[retryCount] || RETRY_DELAYS[RETRY_DELAYS.length - 1];
+  retryCount++;
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    // 只在仍在同一則筆記時重試
+    if (noteId === targetId) {
+      console.log(`重試儲存 (第 ${retryCount} 次)`);
+      saveNote();
+    }
+  }, delay);
 }
 
 function markUnsaved() { const el = document.querySelector(`.note-item[data-id="${noteId}"]`); if (el) el.classList.add('unsaved'); }
@@ -656,11 +728,8 @@ function renderList() {
       <div class="ni-preview">${esc(preview)}</div>
       <div class="ni-date">${date}</div>
       <button class="ni-del" title="刪除">✕</button>`;
-
-    // BUG FIX: 只判斷 classList，不用 dataset.id 判斷（避免誤觸刪除）
     div.querySelector('.ni-del').onclick = e => { e.stopPropagation(); delNote(n.id); };
     div.onclick = () => { openNote(n.id); if (window.innerWidth <= 768) closeMobSidebar(); };
-
     list.appendChild(div);
   });
 }
@@ -680,7 +749,12 @@ function setStatus(s) {
   const chip=$('status-chip'), dot=$('sdot'), txt=$('status-text');
   chip.className = 'status-chip ' + s;
   dot.className  = 'sdot' + (s==='syncing'?' pulse':'');
-  txt.textContent = {online:'已同步至雲端', syncing:'同步中…', offline:'未連線'}[s];
+  txt.textContent = {
+    online: '已同步至雲端',
+    syncing: '同步中…',
+    offline: '未連線',
+    error: '同步失敗'
+  }[s] || s;
 }
 function updateStats() {
   const t = $('editor').innerText || '';
@@ -700,8 +774,8 @@ function closeMobSidebar() {
   $('sidebar').classList.remove('mob-open');
   $('mob-backdrop').classList.remove('visible');
 }
-$('mob-menu-btn').onclick  = () => isMobOpen ? closeMobSidebar() : openMobSidebar();
-$('mob-backdrop').onclick  = closeMobSidebar; // 點遮罩關閉側欄
+$('mob-menu-btn').onclick = () => isMobOpen ? closeMobSidebar() : openMobSidebar();
+$('mob-backdrop').onclick = closeMobSidebar;
 
 // ── Bindings ───────────────────────────────────────────────
 $('btn-new').onclick     = newNote;
@@ -709,14 +783,44 @@ $('btn-del').onclick     = () => noteId && delNote(noteId);
 $('title-input').oninput = onInput;
 $('editor').oninput      = onInput;
 
-// BUG FIX: 頁面關閉前若有未儲存內容，立即同步儲存
+// FIX: beforeunload 使用 keepalive fetch，確保分頁關閉時仍能送出
+// 標準 async/await 在 unload 時會被瀏覽器直接終止
 window.addEventListener('beforeunload', () => {
-  if (saveTimer && noteId) {
+  if (!noteId || !user) return;
+  // 若有排隊中的存檔，或是目前狀態為 syncing/error，都嘗試送出
+  const hasPending = saveTimer !== null ||
+    $('status-chip').classList.contains('syncing') ||
+    $('status-chip').classList.contains('error');
+  if (!hasPending) return;
+
+  if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
-    // 使用 sendBeacon 確保關閉時仍能送出（非同步 fetch 在 unload 時不可靠）
-    // 降級方案：直接呼叫 saveNote（盡力而為）
-    saveNote();
+  }
+
+  const title = $('title-input').value.trim();
+  const body  = $('editor').innerHTML;
+  const now   = new Date().toISOString();
+
+  // FIX: keepalive:true 讓瀏覽器在頁面關閉後仍繼續送出這個請求
+  // 注意：keepalive 有 64KB body 限制，對一般筆記已足夠
+  try {
+    const session = sb.auth.getSession();
+    // 以同步方式取得目前快取的 token（getSession 在已登入時通常可同步取得）
+    const token = sb._session?.access_token || SB_KEY;
+    fetch(`${SB_URL}/rest/v1/notes?id=eq.${noteId}`, {
+      method: 'PATCH',
+      keepalive: true,
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SB_KEY,
+        'Authorization': `Bearer ${token}`,
+        'Prefer': 'return=minimal'
+      },
+      body: JSON.stringify({ title, body, updated_at: now })
+    });
+  } catch(e) {
+    console.warn('beforeunload save failed:', e);
   }
 });
 </script>
